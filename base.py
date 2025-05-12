@@ -3,6 +3,7 @@ import inspect
 import json
 import os
 import random
+import pickle
 import re
 import sys
 import threading
@@ -682,26 +683,39 @@ class Scraper:
                 future_page = [
                     executor.submit(
                         requests.post,
-                        f"https://courson.xyz/load-more-coupons",
+                        "https://courson.xyz/load-more-coupons",
                         json={"filters": {}, "offset": (page - 1) * 30},
+                        timeout=10  # Set a timeout for the request
                     )
                     for page in range(1, 11)
                 ]
-                for i, future in enumerate(
-                    concurrent.futures.as_completed(future_page)
-                ):
-                    content = future.result().json()["coupons"]
+                for i, future in enumerate(concurrent.futures.as_completed(future_page)):
+                    try:
+                        response = future.result()
+                        if response.status_code != 200:
+                            logger.error(f"Request failed with status code {response.status_code}")
+                            continue
+
+                        content = response.json().get("coupons", [])
+                    except requests.exceptions.JSONDecodeError:
+                        logger.error(f"Failed to decode JSON from response: {response.text}")
+                        content = []
+                    except requests.exceptions.RequestException as e:
+                        logger.error(f"Request error: {e}")
+                        continue
+
                     if not content:
                         logger.debug("No more coupons")
                         break
+
                     for item in content:
                         title = item["headline"].strip(' "')
                         link = f"https://www.udemy.com/course/{item['id_name']}/?couponCode={item['coupon_code']}"
                         self.append_to_list(title, link)
-                    self.set_attr("progress", i + 1)
-        except:
-            self.handle_exception()
 
+                    self.set_attr("progress", i + 1)
+        except Exception as e:
+            self.handle_exception()
         self.set_attr("done", True)
 
 
@@ -855,11 +869,32 @@ class Udemy:
         """Gets cookies from browser
         Sets cookies_dict, cookie_jar
         """
-        logger.info("Fetching cookies from browser")
-        cookies = rookiepy.to_cookiejar(rookiepy.load(["www.udemy.com"]))
-        self.cookie_dict: dict = requests.utils.dict_from_cookiejar(cookies)
-        self.cookie_jar = cookies
-        logger.info("Cookies fetched")
+        logger.info("Fetching cookies from browser...")
+        cookies_jar = rookiepy.to_cookiejar(rookiepy.load(["www.udemy.com"]))
+        if not cookies_jar:
+            logger.warning("No browser cookies found for Udemy.")
+            raise LoginException("No browser cookies found.")
+        self.cookie_dict: dict = requests.utils.dict_from_cookiejar(cookies_jar)
+        self.client.cookies.clear() # Clear any old cookies in the session
+        self.client.cookies.update(self.cookie_dict) # Update the session client's cookies
+        logger.info("Cookies fetched from browser and client session updated.")
+
+    def load_cookies(self):
+        """Load cookies from cookies.pkl"""
+        try:
+            with open("cookies.pkl", "rb") as f:
+                self.cookie_dict = pickle.load(f)
+            self.client.cookies.update(self.cookie_dict)
+            logger.info("Cookies loaded from cookies.pkl")
+        except FileNotFoundError:
+            logger.error("cookies.pkl not found. Please log in manually first.")
+            raise LoginException("cookies.pkl not found")
+
+    def save_cookies(self):
+        """Save cookies to cookies.pkl"""
+        with open("cookies.pkl", "wb") as f:
+            pickle.dump(self.cookie_dict, f)
+        logger.info("Cookies saved to cookies.pkl")
 
     def manual_login(self, email: str, password: str):
         """Manual Login to Udemy using email and password and sets cookies
@@ -930,6 +965,7 @@ class Udemy:
             self.make_cookies(
                 r.cookies["client_id"], r.cookies["access_token"], csrf_token
             )
+            self.save_cookies()  # Save cookies after successful login
         else:
             login_error = r.json()["error"]["data"]["formErrors"][0]
             if login_error[0] == "Y":
@@ -938,19 +974,49 @@ class Udemy:
                 raise LoginException("Email or password incorrect")
             else:
                 raise LoginException(login_error)
+    
+    def login(self, email=None, password=None):
+        """Login using cookies or manual credentials"""
+        try:
+            # Attempt 1: Use existing session cookies or load from cookies.pkl
+            self.get_session_info()  # Try loading cookies and validating session
+            logger.info("Session info retrieved using existing/loaded cookies.")
+            return # Successful login
+        except LoginException as e:
+            logger.info(f"get_session_info failed: {e}. Proceeding to other login methods if credentials provided.")
+            if email and password:
+                logger.info("Falling back to manual login")
+                self.manual_login(email, password)
+                self.get_session_info() # Validate and load session with newly saved cookies
+                logger.info("Session info retrieved after manual login.")
+            else:
+                raise # Re-raise the LoginException to be handled by the caller
 
     def get_session_info(self):
         """Get Session info
         Sets Client Session, currency and name
         """
         logger.info("Getting session info")
+        if not self.client.cookies: # If cookies are not already set (e.g., by fetch_cookies or previous manual_login)
+            try:
+                self.load_cookies()  # Load cookies from cookies.pkl into self.client.cookies
+                logger.info("Cookies loaded from cookies.pkl for session validation")
+            except FileNotFoundError: # load_cookies raises FileNotFoundError if pkl is missing
+                logger.warning("cookies.pkl not found.")
+                raise LoginException("cookies.pkl not found. Cannot validate session.")
+        
+        if not self.client.cookies: # Should not happen if load_cookies was successful or fetch_cookies was used
+            logger.error("No cookies available in client session for validation.")
+            raise LoginException("No cookies available for session validation.")
+
+        logger.info("Validating session with current client cookies.")
         s = cloudscraper.CloudScraper()
         # headers = {
         #     "authorization": "Bearer " + self.cookie_dict["access_token"],
         #     "accept": "application/json, text/plain, */*",
         #     "x-requested-with": "XMLHttpRequest",
         #     "x-forwarded-for": str(
-        #         ".".join(map(str, (random.randint(0, 255) for _ in range(4))))
+        #         ".".join(map(str, (random.randint(0, 255) for _ in range(4)))
         #     ),
         #     "x-udemy-authorization": "Bearer " + self.cookie_dict["access_token"],
         #     "content-type": "application/json;charset=UTF-8",
@@ -975,29 +1041,33 @@ class Udemy:
         }
         r = s.get(
             "https://www.udemy.com/api-2.0/contexts/me/?header=True",
-            cookies=self.cookie_dict,
+            cookies=self.client.cookies, # Use cookies from the client session
             headers=headers,
         )
-        r = r.json()
-        if not r["header"]["isLoggedIn"]:
-            logger.error("Login Failed: " + str(r))
-            raise LoginException("Login Failed")
+        try:
+            response_json = r.json()
+        except requests.exceptions.JSONDecodeError:
+            logger.error(f"Failed to decode JSON from session info response: {r.text}")
+            raise LoginException("Failed to get valid session information (JSON decode error).")
+        if not response_json.get("header", {}).get("isLoggedIn"):
+            logger.error("Session validation failed: User not logged in or invalid cookies. Response: " + str(response_json))
+            raise LoginException("Session validation failed: User not logged in or invalid cookies.")
 
-        self.display_name: str = r["header"]["user"]["display_name"]
+        self.display_name: str = response_json["header"]["user"]["display_name"]
         r = s.get(
             "https://www.udemy.com/api-2.0/shopping-carts/me/",
             headers=headers,
-            cookies=self.cookie_dict,
+            cookies=self.client.cookies, # Use cookies from the client session
         )
         r = r.json()
 
         self.currency: str = r["user"]["credit"]["currency_code"]
 
-        s = cloudscraper.CloudScraper()
-        s.cookies.update(self.cookie_dict)
-        s.headers.update(headers)
-        s.keep_alive = False
-        self.client = s
+        # self.client is already a session, we just validated its cookies.
+        # If it was a fresh session before this, load_cookies or fetch_cookies populated it.
+        # If it was from manual_login, it's already set up.
+        # No need to recreate self.client here unless there's a specific reason.
+        # The existing self.client should be fine.
         logger.info("Session info retrieved")
         self.get_enrolled_courses()
 
@@ -1413,197 +1483,3 @@ class Udemy:
             return
         r = r.json()
         self.course.status = r.get("_class") == "course"
-
-    # def handle_course_enrollment(self):
-    #     self.course.retry = False
-    #     self.course.ready_time = None
-    #     self.course.retry_after = None
-
-    #     """Process a course for enrollment"""
-    #     # Check if already enrolled
-    #     slug = self.course.url.split("/")[4]
-    #     if slug in self.enrolled_courses:
-    #         self.print(
-    #             f"You purchased this course on {self.get_date_from_utc(self.enrolled_courses[slug])}",
-    #             color="light blue",
-    #         )
-    #         self.already_enrolled_c += 1
-    #         return
-
-    #     # Get course details and validate
-    #     self.get_course_id()
-    #     if not self.course.is_valid:
-    #         self.print(self.course.error, color="red")
-    #         self.excluded_c += 1
-
-    #     elif self.course.retry:
-    #         self.print("Retrying...", color="red")
-    #         time.sleep(1)
-    #         self.handle_course_enrollment()
-    #         self.retry = False
-    #     elif self.course.is_excluded:
-    #         self.excluded_c += 1
-    #     else:
-    #         # Handle free vs paid courses
-    #         if self.course.is_free:
-    #             self.handle_free_course()
-    #         else:
-    #             self.handle_discounted_course()
-
-    # def handle_free_course(self):
-    #     """Handle enrollment for a free course"""
-    #     if self.settings["discounted_only"]:
-    #         self.print("Free course excluded", color="light blue")
-    #         self.excluded_c += 1
-    #     else:
-    #         self.free_checkout()
-    #         if self.course.status:
-    #             self.print("Successfully Subscribed", color="green")
-    #             self.successfully_enrolled_c += 1
-    #             self.save_course()
-    #         else:
-    #             self.print(
-    #                 "Unknown Error: Report this link to the developer", color="red"
-    #             )
-    #             self.expired_c += 1
-
-    # def handle_discounted_course(self):
-    #     """Handle enrollment for a discounted course"""
-    #     self.check_course()
-    #     if self.course.retry:
-    #         self.print("Retrying...", color="red")
-    #         time.sleep(1)
-    #         self.handle_discounted_course()
-    #         self.retry = False
-    #     if self.course.is_coupon_valid:
-    #         self.process_coupon()
-    #     else:
-    #         self.print("Coupon Expired", color="red")
-    #         self.expired_c += 1
-
-    # def discounted_checkout(self):
-    #     payload = {
-    #         "checkout_environment": "Marketplace",
-    #         "checkout_event": "Submit",
-    #         "payment_info": {
-    #             "method_id": "0",
-    #             "payment_method": "free-method",
-    #             "payment_vendor": "Free",
-    #         },
-    #         "shopping_info": {
-    #             "items": [
-    #                 {
-    #                     "buyable": {"id": self.course.course_id, "type": "course"},
-    #                     "discountInfo": {"code": self.course.coupon_code},
-    #                     "price": {"amount": 0, "currency": self.currency.upper()},
-    #                 }
-    #             ],
-    #             "is_cart": False,
-    #         },
-    #     }
-    #     headers = {
-    #         "User-Agent": "okhttp/4.9.2 UdemyAndroid 8.9.2(499) (phone)",
-    #         "Accept": "application/json, text/plain, */*",
-    #         "Accept-Language": "en-US",
-    #         "Referer": f"https://www.udemy.com/payment/checkout/express/course/{self.course.course_id}/?discountCode={self.course.coupon_code}",
-    #         "Content-Type": "application/json",
-    #         "X-Requested-With": "XMLHttpRequest",
-    #         "x-checkout-is-mobile-app": "true",
-    #         "Origin": "https://www.udemy.com",
-    #         "DNT": "1",
-    #         "Sec-GPC": "1",
-    #         "Connection": "keep-alive",
-    #         "Sec-Fetch-Dest": "empty",
-    #         "Sec-Fetch-Mode": "cors",
-    #         "Sec-Fetch-Site": "same-origin",
-    #         "Priority": "u=0",
-    #     }
-    #     r = self.client.post(
-    #         "https://www.udemy.com/payment/checkout-submit/",
-    #         json=payload,
-    #         headers=headers,
-    #     )
-    #     try:
-    #         retry_after = r.headers.get("retry-after")
-    #         r = r.json()
-    #         if retry_after:
-    #             self.course.set_retry_after(int(retry_after))
-    #             return
-    #     except Exception as e:
-    #         if self.debug:
-    #             logger.error(e)
-    #         self.print(r.text, color="red")
-    #         self.print("Unknown Error: Report this to the developer", color="red")
-    #         self.course.status = "failed"
-    #         self.course.error = "Unknown Error: Report this to the developer"
-    #         return
-    #     self.course.status = r.get("status")
-    #     self.course.error = r.get("message")
-
-    # def process_coupon(self):
-    #     self.discounted_checkout()
-    #     if self.course.retry_after:
-    #         return
-    #     elif self.course.status == "succeeded":
-    #         self.print("Successfully Enrolled To Course :)", color="green")
-    #         self.successfully_enrolled_c += 1
-    #         self.enrolled_courses[self.course.course_id] = self.get_now_to_utc()
-    #         self.amount_saved_c += (
-    #             Decimal(str(self.course.price))
-    #             if self.course.price is not None
-    #             else Decimal(0)
-    #         )
-    #         self.save_course()
-    #         time.sleep(2)
-    #     elif self.course.status == "failed":
-    #         message = self.course.error
-    #         if "item_already_subscribed" in message:
-    #             self.print("Already Enrolled", color="light blue")
-    #             self.already_enrolled_c += 1
-    #         else:
-    #             self.print("Unknown Error: Report this to the developer", color="red")
-    #             self.print(self.course.error, color="red")
-    #     else:
-    #         self.print("Unknown Error: Report this to the developer", color="red")
-    #         self.print(self.course.error, color="red")
-
-    # def start_enrolling(self):
-    #     self.initialize_counters()
-    #     self.setup_txt_file()
-
-    #     # Create a queue of all courses
-    #     course_queue: deque[Course] = deque()
-    #     courses = self.scraped_data
-    #     total_courses = len(courses)
-    #     # for site, courses in self.scraped_data.items():
-    #     # self.print(f"\nSite: {site} [{len(courses)}]", color="cyan")
-    #     courses_list: list[Course] = list(courses)
-    #     # random.shuffle(courses_list)
-    #     course_queue.extend(courses_list)
-
-    #     processed_count = 0
-    #     while course_queue:
-    #         self.course = course_queue.popleft()
-
-    #         # Check if this course has a ready time and needs to wait
-    #         if self.course.should_retry():
-    #             # Put it back in queue if not ready
-    #             course_queue.append(self.course)
-    #             continue
-
-    #         self.print_course_info(processed_count, total_courses)
-
-    #         try:
-    #             self.handle_course_enrollment()
-    #             if self.course.ready_time:
-    #                 # Put back in queue
-    #                 course_queue.insert(self.course.retry_after // 2, self.course)
-    #                 self.print(
-    #                     f"Request Throttled. Will retry after {self.course.retry_after} seconds",
-    #                     color="yellow",
-    #                 )
-    #             else:
-    #                 processed_count += 1
-    #         except Exception as e:
-    #             logger.exception(f"Error processing course {self.course}: {e}")
-    #             processed_count += 1

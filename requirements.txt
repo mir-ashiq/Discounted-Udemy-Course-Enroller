@@ -7,3 +7,5 @@ pyopenssl
 rich
 loguru
 lxml
+schedular
+gradio

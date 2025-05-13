@@ -9,3 +9,4 @@ loguru
 lxml
 schedular
 gradio
+flask

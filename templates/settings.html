@@ -91,6 +91,22 @@
                        {% if settings.discounted_only %}checked{% endif %}>
                 <span class="text-gray-200">Enroll in discounted (paid with 100% coupon) courses only (exclude free courses)</span>
             </label>
+        <div>
+            <h3 class="text-xl font-semibold text-blue-300 mb-4 border-b border-gray-700 pb-2">Automatic Enrollment</h3>
+            <div class="space-y-4">
+                <label class="flex items-center space-x-3 p-3 bg-gray-700 rounded-lg hover:bg-gray-600 transition-colors cursor-pointer">
+                    <input type="checkbox" name="auto_start_enabled" id="auto_start_enabled"
+                           class="form-checkbox h-5 w-5 text-blue-500 bg-gray-600 border-gray-500 rounded focus:ring-blue-400"
+                           {% if settings.auto_start_enabled %}checked{% endif %}>
+                    <span class="text-gray-200">Enable Automatic Enrollment (Relies on saved cookies.pkl)</span>
+                </label>
+                <div>
+                    <label for="auto_start_hours" class="block text-sm font-medium text-gray-300 mb-1">Auto-Start Interval (hours):</label>
+                    <input type="number" name="auto_start_hours" id="auto_start_hours" min="1"
+                           value="{{ settings.auto_start_hours }}"
+                           class="mt-1 block w-24 bg-gray-700 border-gray-600 text-gray-200 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2.5">
+                </div>
+            </div>
         </div>
 
         <div class="pt-6">

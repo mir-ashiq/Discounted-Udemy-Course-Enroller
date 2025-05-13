@@ -10,6 +10,7 @@ from werkzeug.utils import secure_filename
 # We will need to adapt the Udemy and Scraper classes slightly for web use, especially logging.
 from base import Udemy, Scraper, LoginException, scraper_dict, VERSION, resource_path, logger as base_logger
 from cli import create_layout, create_header, create_footer, create_stats_panel, create_course_panel # For inspiration
+import schedule
 
 # --- Flask App Setup ---
 app = Flask(__name__)
@@ -37,6 +38,11 @@ enrollment_stats = {
     "status": "Idle", # Idle, Scraping, Enrolling, Finished, Error
     "sites_progress": {} # { "site_name": {"current": 0, "total": 0, "done": False, "error": ""} }
 }
+scheduler_thread = None
+next_auto_run_time = None
+auto_start_job_instance = None # To store the schedule job object
+
+
 
 # --- Logging Adapter for Flask ---
 class FlaskLogger:
@@ -69,21 +75,50 @@ DEFAULT_SETTINGS_FILE_GUI = resource_path('default-duce-gui-settings.json')
 
 def load_settings():
     try:
-        if os.path.exists(SETTINGS_FILE_GUI):
-            with open(SETTINGS_FILE_GUI, 'r') as f:
-                return json.load(f)
-        else:
-            with open(DEFAULT_SETTINGS_FILE_GUI, 'r') as f:
-                settings = json.load(f)
-            # Save a copy for user modification
-            with open(SETTINGS_FILE_GUI, 'w') as f:
-                json.dump(settings, f, indent=4)
-            return settings
-    except Exception as e:
-        flask_logger.error(f"Error loading settings: {e}")
-        # Fallback to default if any error
+        # Load default settings
         with open(DEFAULT_SETTINGS_FILE_GUI, 'r') as f:
-            return json.load(f)
+            settings = json.load(f)
+    except Exception as e:
+        flask_logger.error(f"Critical error loading default settings from {DEFAULT_SETTINGS_FILE_GUI}: {e}")
+        # Fallback to a minimal hardcoded structure
+        settings = {
+            "sites": {key: True for key in scraper_dict.keys()}, "categories": {}, "languages": {},
+            "min_rating": 0.0, "course_update_threshold_months": 24, "save_txt": False,
+            "discounted_only": False, "instructor_exclude": [], "title_exclude": [],
+            "auto_start_enabled": False, "auto_start_hours": 4,
+            "stay_logged_in": {"auto": False, "manual": False}, "email": "", "password": ""
+        }
+
+    # Load user settings and update defaults
+    if os.path.exists(SETTINGS_FILE_GUI):
+        try:
+            with open(SETTINGS_FILE_GUI, 'r') as f:
+                user_settings = json.load(f)
+            settings.update(user_settings)
+        except Exception as e:
+            flask_logger.error(f"Error loading user settings from {SETTINGS_FILE_GUI}, using defaults. Error: {e}")
+    else:
+        # User settings file doesn't exist, save the current settings (which are defaults)
+        save_settings(settings)
+
+    # Ensure new keys are present
+    settings.setdefault("auto_start_enabled", False)
+    settings.setdefault("auto_start_hours", 4)
+    for site_key in scraper_dict.keys(): # Ensure all sites are in settings
+        settings["sites"].setdefault(site_key, True)
+
+    # Ensure default categories and languages are present (best effort)
+    try:
+        with open(DEFAULT_SETTINGS_FILE_GUI, 'r') as f:
+            default_s = json.load(f)
+        for cat_key in default_s.get("categories", {}).keys():
+            settings["categories"].setdefault(cat_key, True)
+        for lang_key in default_s.get("languages", {}).keys():
+            settings["languages"].setdefault(lang_key, True)
+    except Exception: # nosec
+        pass
+
+    return settings
 
 def save_settings(settings_data):
     try:
@@ -93,6 +128,92 @@ def save_settings(settings_data):
     except Exception as e:
         flask_logger.error(f"Error saving settings: {e}")
         return False
+
+# --- Scheduler Functions ---
+def auto_enroll_job():
+    """Job to be run by the scheduler."""
+    global udemy_instance, enrollment_thread, enrollment_stats
+
+    flask_logger.info("Auto-enroll job triggered.")
+
+    if enrollment_thread and enrollment_thread.is_alive():
+        flask_logger.info("Auto-enroll: Process already running. Skipping.")
+        return
+
+    temp_udemy_instance = Udemy("web", debug=True)
+    temp_udemy_instance.logger = flask_logger
+    
+    user_display_name = None
+    user_currency = "USD" 
+
+    try:
+        flask_logger.info("Auto-enroll: Attempting login via saved cookies (cookies.pkl)...")
+        temp_udemy_instance.load_cookies()
+        temp_udemy_instance.get_session_info() 
+        user_display_name = temp_udemy_instance.display_name
+        user_currency = temp_udemy_instance.currency
+        
+        udemy_instance = temp_udemy_instance 
+        flask_logger.info(f"Auto-enroll: Successfully logged in as {user_display_name} using saved cookies.")
+
+    except LoginException as e:
+        flask_logger.error(f"Auto-enroll: LoginException with saved cookies: {e}. Cannot start enrollment.")
+        enrollment_stats["status"] = f"Auto-Enroll Error: Login failed ({e})."
+        return 
+    except Exception as e:
+        flask_logger.exception(f"Auto-enroll: Unexpected error during login attempt: {e}")
+        enrollment_stats["status"] = f"Auto-Enroll Error: Unexpected login error ({e})."
+        return 
+
+    if user_display_name:
+        flask_logger.info(f"Auto-enroll: Starting enrollment process for {user_display_name}.")
+        enrollment_thread = threading.Thread(target=run_enrollment_process, args=(user_display_name, user_currency))
+        enrollment_thread.daemon = True
+        enrollment_thread.start()
+    else:
+        flask_logger.error("Auto-enroll: Could not establish user session. Skipping enrollment.")
+        enrollment_stats["status"] = "Auto-Enroll Error: Session could not be established."
+
+def run_scheduler_loop():
+    global next_auto_run_time
+    flask_logger.info("Scheduler loop started.")
+    while True:
+        schedule.run_pending()
+        if schedule.jobs:
+            try:
+                next_auto_run_time = schedule.next_run()
+            except Exception as e: 
+                flask_logger.debug(f"Scheduler: Could not get next_run: {e}")
+                next_auto_run_time = None
+        else:
+            next_auto_run_time = None
+        time.sleep(60) 
+
+def start_auto_enroll_scheduler(hours: int):
+    global scheduler_thread, auto_start_job_instance
+    
+    if not isinstance(hours, int) or hours < 1:
+        flask_logger.error(f"Invalid auto_start_hours: {hours}. Must be an integer >= 1.")
+        return
+
+    stop_auto_enroll_scheduler() 
+
+    flask_logger.info(f"Scheduling auto-enroll job to run every {hours} hours.")
+    auto_start_job_instance = schedule.every(hours).hours.do(auto_enroll_job)
+    
+    if scheduler_thread is None or not scheduler_thread.is_alive():
+        scheduler_thread = threading.Thread(target=run_scheduler_loop)
+        scheduler_thread.daemon = True
+        scheduler_thread.start()
+        flask_logger.info("Scheduler thread started.")
+
+def stop_auto_enroll_scheduler():
+    global auto_start_job_instance, next_auto_run_time
+    if auto_start_job_instance:
+        flask_logger.info("Stopping auto-enroll scheduler and clearing job.")
+        schedule.cancel_job(auto_start_job_instance)
+        auto_start_job_instance = None
+    next_auto_run_time = None
 
 # --- Authentication ---
 @app.route('/login', methods=['GET', 'POST'])
@@ -227,12 +348,21 @@ def settings_page():
         # Exclusions (handle multiline text to list)
         settings_data["instructor_exclude"] = [line.strip() for line in request.form.get('instructor_exclude', '').splitlines() if line.strip()]
         settings_data["title_exclude"] = [line.strip() for line in request.form.get('title_exclude', '').splitlines() if line.strip()]
+        
+        settings_data["auto_start_enabled"] = 'auto_start_enabled' in request.form
+        settings_data["auto_start_hours"] = int(request.form.get('auto_start_hours', 4))
+
 
         if save_settings(settings_data):
             flash('Settings saved successfully!', 'success')
         else:
             flash('Error saving settings.', 'danger')
         return redirect(url_for('settings_page'))
+        # Update scheduler based on new settings
+        if settings_data["auto_start_enabled"]:
+            start_auto_enroll_scheduler(settings_data["auto_start_hours"])
+        else:
+            stop_auto_enroll_scheduler()
 
     return render_template('settings.html', 
                            settings=settings_data, 
@@ -481,10 +611,29 @@ def get_status():
     else:
         pruned_logs = enrollment_logs
         
+    auto_start_status_msg = "Disabled"
+    next_run_str = "N/A"
+    current_settings = load_settings()
+
+    if current_settings.get("auto_start_enabled"):
+        if next_auto_run_time:
+            try:
+                next_run_str = next_auto_run_time.strftime("%Y-%m-%d %H:%M:%S")
+                auto_start_status_msg = f"Enabled, next run: {next_run_str}"
+            except AttributeError: 
+                next_run_str = "Pending schedule..."
+                auto_start_status_msg = f"Enabled, next run: {next_run_str}"
+        elif schedule.jobs:
+            next_run_str = "Calculating..."
+            auto_start_status_msg = f"Enabled, next run: {next_run_str}"
+        else:
+            auto_start_status_msg = "Enabled, waiting for next schedule..."
+            
     return jsonify({
         "stats": enrollment_stats,
         "logs": pruned_logs,
-        "process_running": enrollment_thread is not None and enrollment_thread.is_alive()
+        "process_running": enrollment_thread is not None and enrollment_thread.is_alive(),
+        "auto_start_status": auto_start_status_msg,
     })
 
 
@@ -498,8 +647,18 @@ def internal_server_error(e):
     flask_logger.exception("Internal Server Error")
     return render_template('500.html', error=str(e)), 500
 
+# --- Initial App Setup ---
+def initial_app_setup():
+    app_settings = load_settings()
+    if app_settings.get("auto_start_enabled", False):
+        hours = app_settings.get("auto_start_hours", 4)
+        if isinstance(hours, int) and hours >=1:
+             start_auto_enroll_scheduler(hours)
+        else:
+            flask_logger.error(f"Invalid auto_start_hours ({hours}) in settings. Auto-start disabled.")
 
 if __name__ == '__main__':
     # For development, using Flask's built-in server.
     # For production, use a proper WSGI server like Gunicorn or Waitress.
+    initial_app_setup()
     app.run(debug=True, host='0.0.0.0', port=5001)

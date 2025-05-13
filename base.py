@@ -778,18 +778,36 @@ class Udemy:
         return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def load_settings(self):
+        default_settings_path = resource_path(f"default-duce-{self.interface}-settings.json")
+        user_settings_path = f"duce-{self.interface}-settings.json"
+
+        # Load default settings first
         try:
-            with open(f"duce-{self.interface}-settings.json") as f:
-                self.settings = json.load(f)
-        except FileNotFoundError:
-            with open(
-                resource_path(f"default-duce-{self.interface}-settings.json")
-            ) as f:
-                self.settings = json.load(f)
+            with open(default_settings_path) as f:
+                default_settings = json.load(f)
+        except Exception as e:
+            logger.error(f"Could not load default settings from {default_settings_path}: {e}")
+            default_settings = {} # Fallback
+
+        self.settings = default_settings.copy() # Start with defaults
+
+        # Try to load user settings and override defaults
+        try:
+            if os.path.exists(user_settings_path):
+                with open(user_settings_path) as f:
+                    user_settings = json.load(f)
+                self.settings.update(user_settings) # Override defaults with user's values
+            else:
+                # If user settings file doesn't exist, save the defaults as the initial user settings file.
+                with open(user_settings_path, 'w') as f:
+                    json.dump(self.settings, f, indent=4)
+        except Exception as e:
+            logger.error(f"Error loading or merging user settings from {user_settings_path}. Using defaults/previous state. Error: {e}")
+
         if (
             self.interface == "cli" and "use_browser_cookies" not in self.settings
         ):  # v2.1
-            self.settings.get("use_browser_cookies", False)
+            self.settings["use_browser_cookies"] = False
         # v2.2
         if "course_update_threshold_months" not in self.settings:
             self.settings["course_update_threshold_months"] = 24  # 2 years
@@ -797,19 +815,25 @@ class Udemy:
         # v2.3.3
 
         if "Vietnamese" not in self.settings["languages"]:
-            self.settings["languages"]["Vietnamese"] = True
+            self.settings.setdefault("languages", {})["Vietnamese"] = True
 
         if "Courson" not in self.settings["sites"]:
-            self.settings["sites"]["Courson"] = True
+            self.settings.setdefault("sites", {})["Courson"] = True
         if "Course Joiner" not in self.settings["sites"]:
-            self.settings["sites"]["Course Joiner"] = True
+            self.settings.setdefault("sites", {})["Course Joiner"] = True
+
+        # Add new auto-start settings if missing
+        if "auto_start_enabled" not in self.settings:
+            self.settings["auto_start_enabled"] = False
+        if "auto_start_hours" not in self.settings:
+            self.settings["auto_start_hours"] = 4
 
         self.settings["languages"] = dict(
-            sorted(self.settings["languages"].items(), key=lambda item: item[0])
+            sorted(self.settings.get("languages", {}).items(), key=lambda item: item[0])
         )
         self.save_settings()
-        self.title_exclude = "\n".join(self.settings["title_exclude"])
-        self.instructor_exclude = "\n".join(self.settings["instructor_exclude"])
+        self.title_exclude = "\n".join(self.settings.get("title_exclude",[]))
+        self.instructor_exclude = "\n".join(self.settings.get("instructor_exclude",[]))
 
     def save_settings(self):
         with open(f"duce-{self.interface}-settings.json", "w") as f:

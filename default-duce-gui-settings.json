@@ -59,5 +59,7 @@
     "password": "",
     "save_txt": false,
     "discounted_only": false,
+    "auto_start_enabled": false,
+    "auto_start_hours": 4,
     "course_update_threshold_months": 24
 }

@@ -62,6 +62,8 @@
     "password": "",
     "save_txt": true,
     "discounted_only": false,
+    "auto_start_enabled": false,
+    "auto_start_hours": 4,
     "use_browser_cookies": false,
     "course_update_threshold_months": 24
 }

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block title %}Page Not Found - Udemy Course Enroller{% endblock %}
+
+{% block content %}
+<div class="text-center py-20">
+    <h1 class="text-6xl font-bold text-red-500">404</h1>
+    <p class="text-2xl text-gray-300 mt-4">Oops! Page Not Found.</p>
+    <p class="text-gray-400 mt-2">The page you are looking for does not exist or has been moved.</p>
+    <a href="{{ url_for('index') }}" class="mt-8 inline-block btn btn-primary">
+        Go to Homepage
+    </a>
+</div>
+{% endblock %}
+

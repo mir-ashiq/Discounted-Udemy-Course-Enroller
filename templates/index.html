@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Udemy Course Enroller{% endblock %}
+
+{% block head_extra %}
+<script>
+    let statusInterval;
+    let autoScrollLogs = true;
+
+    function updateStatus() {
+        fetch("{{ url_for('get_status') }}")
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'error' && data.message === 'Not logged in') {
+                    window.location.href = "{{ url_for('login') }}";
+                    return;
+                }
+
+                // Update stats
+                document.getElementById('stat-status').textContent = data.stats.status;
+                document.getElementById('stat-enrolled').textContent = data.stats.successfully_enrolled_c;
+                document.getElementById('stat-already').textContent = data.stats.already_enrolled_c;
+                document.getElementById('stat-expired').textContent = data.stats.expired_c;
+                document.getElementById('stat-excluded').textContent = data.stats.excluded_c;
+                document.getElementById('stat-saved').textContent = `${parseFloat(data.stats.amount_saved_c).toFixed(2)} ${data.stats.currency}`;
+                
+                const currentCourseTitleEl = document.getElementById('current-course-title');
+                const currentCourseUrlEl = document.getElementById('current-course-url');
+                if (currentCourseTitleEl) currentCourseTitleEl.textContent = data.stats.current_course_title;
+                if (currentCourseUrlEl) {
+                    currentCourseUrlEl.textContent = data.stats.current_course_url;
+                    currentCourseUrlEl.href = data.stats.current_course_url;
+                }
+
+
+                const totalProcessedEl = document.getElementById('total-processed');
+                const totalToProcessEl = document.getElementById('total-to-process');
+                if (totalProcessedEl) totalProcessedEl.textContent = data.stats.total_courses_processed;
+                if (totalToProcessEl) totalToProcessEl.textContent = data.stats.total_courses_to_process;
+                
+                const pendingEnrollmentEl = document.getElementById('pending-enrollment');
+                if(pendingEnrollmentEl) pendingEnrollmentEl.textContent = data.stats.pending_enrollment || '0/5';
+
+
+                // Update overall progress bar
+                const overallProgressFill = document.getElementById('overall-progress-fill');
+                const overallProgressText = document.getElementById('overall-progress-text');
+                if (data.stats.total_courses_to_process > 0) {
+                    const overallPercentage = (data.stats.total_courses_processed / data.stats.total_courses_to_process) * 100;
+                    overallProgressFill.style.width = `${Math.min(100, overallPercentage.toFixed(2))}%`;
+                    overallProgressText.textContent = `${Math.min(100, overallPercentage.toFixed(0))}% Processed`;
+                } else {
+                    overallProgressFill.style.width = '0%';
+                    overallProgressText.textContent = '0% Processed';
+                }
+
+
+                // Update logs
+                const logArea = document.getElementById('log-area');
+                if (logArea) {
+                    const currentLogs = data.logs.join('\\n');
+                    if (logArea.textContent !== currentLogs) {
+                         logArea.textContent = currentLogs;
+                         if(autoScrollLogs) {
+                            logArea.scrollTop = logArea.scrollHeight;
+                         }
+                    }
+                }
+                
+                // Update site-specific progress
+                const sitesProgressContainer = document.getElementById('sites-progress-container');
+                if (sitesProgressContainer) {
+                    let sitesHtml = '';
+                    for (const [site, progress] of Object.entries(data.stats.sites_progress)) {
+                        const percentage = progress.total > 0 ? (progress.current / progress.total) * 100 : 0;
+                        sitesHtml += `
+                            <div class="mb-2">
+                                <div class="flex justify-between mb-1">
+                                    <span class="text-sm font-medium text-gray-300">${site} - ${progress.status || 'Pending'}</span>
+                                    <span class="text-sm font-medium text-gray-400">${progress.current}/${progress.total}</span>
+                                </div>
+                                <div class="w-full bg-gray-600 rounded-full h-2.5">
+                                    <div class="bg-blue-500 h-2.5 rounded-full" style="width: ${percentage.toFixed(2)}%"></div>
+                                </div>
+                                ${progress.error ? `<p class="text-red-400 text-xs mt-1">${progress.error}</p>` : ''}
+                            </div>
+                        `;
+                    }
+                    sitesProgressContainer.innerHTML = sitesHtml;
+                }
+
+
+                // Enable/disable start button
+                const startButton = document.getElementById('start-enrollment-btn');
+                if (startButton) {
+                    startButton.disabled = data.process_running;
+                    startButton.textContent = data.process_running ? 'Processing...' : 'Start Enrollment Process';
+                }
+
+                if (!data.process_running && (data.stats.status === 'Finished' || data.stats.status.startsWith('Error'))) {
+                    //clearInterval(statusInterval); // Stop polling if process is done or errored
+                }
+            })
+            .catch(error => {
+                console.error("Error fetching status:", error);
+                // clearInterval(statusInterval); // Stop on error
+            });
+    }
+
+    function startEnrollment() {
+        const startButton = document.getElementById('start-enrollment-btn');
+        startButton.disabled = true;
+        startButton.textContent = 'Starting...';
+
+        fetch("{{ url_for('start_enrollment') }}", { method: 'POST' })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    // statusInterval = setInterval(updateStatus, 2000); // Start polling
+                    updateStatus(); // Initial immediate update
+                } else {
+                    alert("Error starting process: " + data.message);
+                    startButton.disabled = false;
+                    startButton.textContent = 'Start Enrollment Process';
+                }
+            })
+            .catch(error => {
+                console.error("Error starting enrollment:", error);
+                alert("Failed to start enrollment process.");
+                startButton.disabled = false;
+                startButton.textContent = 'Start Enrollment Process';
+            });
+    }
+    
+    document.addEventListener('DOMContentLoaded', function() {
+        updateStatus(); // Initial status update on page load
+        statusInterval = setInterval(updateStatus, 2000); // Start polling every 2 seconds
+
+        const logArea = document.getElementById('log-area');
+        if (logArea) {
+            logArea.addEventListener('scroll', function() {
+                // Disable autoscroll if user scrolls up manually
+                if (logArea.scrollTop + logArea.clientHeight < logArea.scrollHeight - 20) { // 20px buffer
+                    autoScrollLogs = false;
+                } else {
+                    autoScrollLogs = true;
+                }
+            });
+        }
+    });
+
+</script>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+    <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
+        <h2 class="text-2xl font-semibold text-blue-400 mb-6">Enrollment Control</h2>
+        <button id="start-enrollment-btn" onclick="startEnrollment()"
+                class="btn btn-primary w-full sm:w-auto text-lg">
+            Start Enrollment Process
+        </button>
+        <p class="text-sm text-gray-400 mt-3">
+            Current Status: <strong id="stat-status" class="text-yellow-400">{{ enrollment_stats.status }}</strong>
+        </p>
+    </div>
+
+    <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
+        <h3 class="text-xl font-semibold text-blue-300 mb-3">Overall Course Processing Progress</h3>
+        <div class="w-full bg-gray-600 rounded-full h-6">
+            <div id="overall-progress-fill" class="bg-green-500 h-6 rounded-full text-xs font-medium text-blue-100 text-center p-1 leading-none" style="width: 0%">
+                <span id="overall-progress-text">0% Processed</span>
+            </div>
+        </div>
+        <div class="mt-2 text-sm text-gray-400">
+            Processed: <span id="total-processed" class="font-semibold">{{ enrollment_stats.total_courses_processed }}</span> / 
+            <span id="total-to-process" class="font-semibold">{{ enrollment_stats.total_courses_to_process }}</span> Courses
+        </div>
+    </div>
+    
+    <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
+        <h3 class="text-xl font-semibold text-blue-300 mb-3">Current Course</h3>
+        <p class="text-gray-400">Title: <strong id="current-course-title" class="text-gray-200">{{ enrollment_stats.current_course_title }}</strong></p>
+        <p class="text-gray-400">URL: 
+            <a id="current-course-url" href="{{ enrollment_stats.current_course_url if enrollment_stats.current_course_url != 'N/A' else '#' }}" 
+               target="_blank" 
+               class="text-blue-400 hover:underline truncate block">
+               {{ enrollment_stats.current_course_url }}
+            </a>
+        </p>
+    </div>
+
+
+    <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
+        <h3 class="text-xl font-semibold text-blue-300 mb-4">Enrollment Statistics</h3>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <div class="stat-card bg-green-700">
+                <div class="stat-title">Successfully Enrolled</div>
+                <div id="stat-enrolled" class="stat-value">{{ enrollment_stats.successfully_enrolled_c }}</div>
+            </div>
+            <div class="stat-card bg-blue-700">
+                <div class="stat-title">Already Enrolled</div>
+                <div id="stat-already" class="stat-value">{{ enrollment_stats.already_enrolled_c }}</div>
+            </div>
+            <div class="stat-card bg-red-700">
+                <div class="stat-title">Expired Courses</div>
+                <div id="stat-expired" class="stat-value">{{ enrollment_stats.expired_c }}</div>
+            </div>
+            <div class="stat-card bg-yellow-600"> <div class="stat-title">Excluded Courses</div>
+                <div id="stat-excluded" class="stat-value">{{ enrollment_stats.excluded_c }}</div>
+            </div>
+            <div class="stat-card bg-purple-700">
+                <div class="stat-title">Amount Saved</div>
+                <div id="stat-saved" class="stat-value">{{ "%.2f"|format(enrollment_stats.amount_saved_c) }} {{ enrollment_stats.currency }}</div>
+            </div>
+             <div class="stat-card bg-indigo-700">
+                <div class="stat-title">Pending Bulk Enrollment</div>
+                <div id="pending-enrollment" class="stat-value">{{ enrollment_stats.pending_enrollment or '0/5' }}</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
+        <h3 class="text-xl font-semibold text-blue-300 mb-4">Scraping Progress per Site</h3>
+        <div id="sites-progress-container" class="space-y-3">
+            {% if not enrollment_stats.sites_progress %}
+            <p class="text-gray-400">Scraping not started or no sites configured.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-xl font-semibold text-blue-300">Logs</h3>
+            <label for="autoscroll-logs-checkbox" class="text-sm text-gray-400 flex items-center">
+                <input type="checkbox" id="autoscroll-logs-checkbox" class="mr-2 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-600 bg-gray-700 rounded" checked onchange="autoScrollLogs = this.checked;">
+                Autoscroll Logs
+            </label>
+        </div>
+        <div id="log-area" class="log-area">
+            {% for log_entry in logs %}
+                {{ log_entry }}
+            {% else %}
+                No logs yet.
+            {% endfor %}
+        </div>
+    </div>
+
+</div>
+{% endblock %}

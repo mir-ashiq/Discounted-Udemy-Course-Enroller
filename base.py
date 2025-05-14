@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, unquote, urlparse, urlsplit, urlunparse
 
 import cloudscraper
 import requests
-import rookiepy
+import os as rookiepy #getting error while installing rookiepy on koyeb
 from bs4 import BeautifulSoup as bs
 from loguru import logger
 from rich import print

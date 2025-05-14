@@ -2,6 +2,7 @@
 #rookiepy
 cloudscraper
 bs4
+gunicorn
 requests
 pyopenssl
 rich

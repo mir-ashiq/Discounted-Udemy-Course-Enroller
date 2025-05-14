@@ -1,5 +1,5 @@
-FreeSimpleGUI
-rookiepy
+#FreeSimpleGUI
+#rookiepy
 cloudscraper
 bs4
 requests

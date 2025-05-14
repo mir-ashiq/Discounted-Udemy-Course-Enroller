@@ -370,7 +370,7 @@ def settings_page():
                            version=VERSION)
 
 # --- Enrollment Process ---
-def reset_enrollment_stats(user_currency_from_session: str):
+def reset_enrollment_stats(user_currency_from_session: str = "USD"):
     global enrollment_stats, enrollment_logs
     enrollment_logs.clear()
     enrollment_stats = {

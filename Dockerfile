@@ -10,5 +10,5 @@ COPY --chown=user ./requirements.txt requirements.txt
 RUN pip install --no-cache-dir --upgrade -r requirements.txt
 
 COPY --chown=user . /app
-#CMD ["python", "app.py"]
-CMD ["gunicorn", "--bind", "0.0.0.0:5001", "--workers", "2", "app:app"]
+CMD ["python", "app.py"]
+#CMD ["gunicorn", "--bind", "0.0.0.0:5001", "--workers", "2", "app:app"]
